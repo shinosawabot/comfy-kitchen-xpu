@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F  # noqa: N812
-from omni_xpu_kernel import svdq
+from omni_xpu_kernel import device as omni_device, svdq
 
 from comfy_kitchen.backends.eager import svdquant as eager_svdquant
 
 _GROUP_SIZE = 64
+
+
+def _requires_reference_w4a4(tensor: torch.Tensor) -> bool:
+    index = tensor.device.index
+    if index is None:
+        index = torch.xpu.current_device()
+    return omni_device.info(index).get("physical_build_target") == "dg2"
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -82,7 +89,11 @@ def scaled_mm_svdquant_w4a4(
     act_unsigned: bool = False,
 ) -> torch.Tensor:
     """Run Kitchen-equivalent SVDQuant using omni dequant and oneDNN GEMM."""
-    if act_unsigned and not hasattr(svdq, "dequantize_u4"):
+    # DG2's oneDNN INT4 path currently differs from Kitchen's W4A4 reference
+    # rounding. Keep the public operation on its exact same-device eager route
+    # until the native path satisfies this contract. Inspect the input device,
+    # not the default XPU or the provider's packaging target.
+    if _requires_reference_w4a4(act) or (act_unsigned and not hasattr(svdq, "dequantize_u4")):
         return eager_svdquant.scaled_mm_svdquant_w4a4(
             act, wgt, ascales, wscales, lora_act_in, lora_up, bias, act_unsigned
         )
@@ -115,6 +126,15 @@ def scaled_mm_svdquant_w4a4_preconverted(
     compute_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Run SVDQuant with destructively prepared, single-copy XPU weights."""
+    if _requires_reference_w4a4(act):
+        # Restore the signed view transiently; do not mutate prepared storage.
+        # This reference route materializes intermediates and is not the
+        # low-peak native oneDNN route.
+        signed_weight = (packed_u4.view(torch.uint8) ^ 0x88).view(torch.int8)
+        return eager_svdquant.scaled_mm_svdquant_w4a4(
+            act, signed_weight, ascales, scales_f16.to(compute_dtype),
+            lora_act_in, lora_up, bias,
+        )
     act_fp = svdq.dequantize_w4(act.view(torch.uint8), ascales, compute_dtype)
     out = svdq.onednn_int4_gemm_preconverted(
         act_fp,

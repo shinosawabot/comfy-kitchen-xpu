@@ -26,6 +26,7 @@ PROVIDER_ID = "comfy_kitchen.xpu"
 ENTRY_POINT_GROUP = "comfyui_omnixpu.runtime_providers"
 SOURCE_REPOSITORY = "https://github.com/xiangyuT/comfy-kitchen-xpu.git"
 SUPPORTED_PLATFORMS = ("linux", "win32")
+SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h", "dg2")
 _REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
@@ -199,8 +200,8 @@ def build_provider_wheel(
         raise ValueError("source revision must be a lowercase 40-character Git SHA")
     if not torch_version.endswith("+xpu"):
         raise ValueError("torch version must identify an XPU build with +xpu")
-    if xpu_target not in {"bmg", "ptl-h"}:
-        raise ValueError("xpu target must be bmg or ptl-h")
+    if xpu_target not in SUPPORTED_XPU_TARGETS:
+        raise ValueError(f"xpu target must be one of {SUPPORTED_XPU_TARGETS}")
 
     source_version, requires_python, tags, source_files = _source_wheel_contract(
         source_wheel
@@ -298,7 +299,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--torch-version", required=True)
-    parser.add_argument("--xpu-target", choices=("bmg", "ptl-h"), required=True)
+    parser.add_argument("--xpu-target", choices=SUPPORTED_XPU_TARGETS, required=True)
     return parser.parse_args()
 
 

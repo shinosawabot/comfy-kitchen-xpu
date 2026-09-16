@@ -55,8 +55,9 @@ def _source_wheel(path: Path, *, distribution: str = "comfy-kitchen") -> Path:
     return path
 
 
+@pytest.mark.parametrize("xpu_target", ["bmg", "ptl-h", "dg2"])
 def test_provider_wheel_has_disjoint_top_level_and_verified_manifest(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, xpu_target
 ):
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
     builder = _load_builder()
@@ -67,7 +68,7 @@ def test_provider_wheel_has_disjoint_top_level_and_verified_manifest(
         output_directory=tmp_path / "dist",
         source_revision="a" * 40,
         torch_version="2.13.0+xpu",
-        xpu_target="bmg",
+        xpu_target=xpu_target,
     )
 
     assert provider.name == "comfy_kitchen_xpu_runtime-0.2.33-py3-none-any.whl"
@@ -98,7 +99,7 @@ def test_provider_wheel_has_disjoint_top_level_and_verified_manifest(
         assert manifest["runtime"] == {
             "torch_version": "2.13.0+xpu",
             "torch_build": "xpu",
-            "xpu_targets": ["bmg"],
+            "xpu_targets": [xpu_target],
             "platforms": ["linux", "win32"],
         }
         vendored_bytes = archive.read(vendored)
@@ -164,3 +165,26 @@ def test_provider_builder_rejects_an_unrelated_distribution(tmp_path):
             torch_version="2.13.0+xpu",
             xpu_target="bmg",
         )
+
+
+@pytest.mark.parametrize("target", ["a770", "unknown", "DG2"])
+def test_provider_builder_rejects_unknown_target(tmp_path, target):
+    builder = _load_builder()
+    source = _source_wheel(tmp_path / "comfy_kitchen-0.2.33-py3-none-any.whl")
+    with pytest.raises(ValueError, match="xpu target must be"):
+        builder.build_provider_wheel(
+            source_wheel=source, output_directory=tmp_path / "dist",
+            source_revision="c" * 40, torch_version="2.13.0+xpu",
+            xpu_target=target,
+        )
+
+
+def test_cli_accepts_dg2(tmp_path, monkeypatch):
+    builder = _load_builder()
+    monkeypatch.setattr(sys, "argv", [
+        str(_BUILDER), "--source-wheel", str(tmp_path / "source.whl"),
+        "--output-dir", str(tmp_path / "dist"),
+        "--source-revision", "d" * 40, "--torch-version", "2.13.0+xpu",
+        "--xpu-target", "dg2",
+    ])
+    assert builder._parse_args().xpu_target == "dg2"

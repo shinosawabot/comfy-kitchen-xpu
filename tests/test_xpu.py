@@ -422,8 +422,12 @@ def test_xpu_int8_linear_swiglu_input_act():
 
 
 def test_xpu_int8_linear_gelu_input_act_uses_fused_boundary(monkeypatch):
-    """The no-ConvRot GELU route must not materialize a floating activation."""
+    """The BMG no-ConvRot GELU route must not materialize an activation."""
+    import omni_xpu_kernel
     from omni_xpu_kernel import int8 as omni_int8
+
+    if omni_xpu_kernel.core_aot_target() != "bmg":
+        pytest.skip("fused GELU routing is a BMG kernel policy")
 
     batch, tokens, hidden, output = 2, 17, 256, 96
     x = torch.randn(batch, tokens, hidden, device="xpu", dtype=torch.bfloat16)
@@ -986,3 +990,36 @@ def test_xpu_svdquant_destructive_preconversion_keeps_single_weight_copy():
     assert weight._qdata.data_ptr() == restored_ptr
     assert not weight._params.xpu_preconverted
     assert torch.equal(weight._qdata, saved_qdata)
+
+
+def test_xpu_svdquant_reference_policy_uses_input_device(monkeypatch):
+    from types import SimpleNamespace
+    from comfy_kitchen.backends.xpu import svdquant as backend
+
+    seen = []
+
+    def device_info(index):
+        seen.append(index)
+        return {"physical_build_target": "dg2" if index == 1 else "bmg"}
+
+    monkeypatch.setattr(backend.omni_device, "info", device_info)
+    assert backend._requires_reference_w4a4(SimpleNamespace(device=torch.device("xpu:1")))
+    assert not backend._requires_reference_w4a4(SimpleNamespace(device=torch.device("xpu:0")))
+    assert seen == [1, 0]
+
+
+def test_xpu_dg2_w4a4_reference_does_not_call_native_gemm(monkeypatch):
+    from comfy_kitchen.backends.xpu import svdquant as backend
+    from omni_xpu_kernel import device as omni_device
+
+    if omni_device.info(torch.xpu.current_device()).get("physical_build_target") != "dg2":
+        pytest.skip("DG2 reference-route contract")
+
+    def reject_native(*args, **kwargs):
+        raise AssertionError("DG2 W4A4 selected native oneDNN GEMM")
+
+    monkeypatch.setattr(backend.svdq, "onednn_int4_gemm", reject_native)
+    monkeypatch.setattr(backend.svdq, "onednn_int4_gemm_preconverted", reject_native)
+    test_xpu_svdquant_signed_pipeline_matches_eager()
+    test_xpu_svdquant_unsigned_native_matches_eager()
+    test_xpu_svdquant_destructive_preconversion_keeps_single_weight_copy()
