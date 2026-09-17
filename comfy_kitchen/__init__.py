@@ -206,6 +206,8 @@ def sol_attn(
     Returns:
         ``(B, T, H, 128)`` attention output.
     """
+    if q.device.type == "xpu" and token_aug != 0 and not sol_attn_is_available(q.device):
+        raise NotImplementedError("XPU Sol reference does not implement token_aug; a native Sol sidecar is required")
     return torch.ops.comfy_kitchen.sol_attn(
         q, k, v, tau, scale,
         [0, 0] if sink_blocks is None else list(sink_blocks),

@@ -18,7 +18,16 @@ _MINIMUM_CAPABILITY = (8, 0)
 
 
 def is_available(device: torch.device | int | None = None) -> bool:
-    """Return whether flash attention decode is available on this GPU."""
+    """Return decode availability; an explicit XPU uses the Torch reference.
+
+    With no device, preserve the native CUDA/HIP capability query. XPU callers
+    must pass their device; this does not advertise a native flash kernel.
+    """
+    if device is not None and not isinstance(device, int):
+        requested = torch.device(device)
+        if requested.type == "xpu":
+            index = torch.xpu.current_device() if requested.index is None and torch.xpu.is_available() else requested.index
+            return bool(torch.xpu.is_available() and index is not None and 0 <= index < torch.xpu.device_count())
     if (
         _cuda_backend is None
         or not torch.cuda.is_available()
@@ -62,10 +71,41 @@ def _num_splits(batch_heads: int, kv_capacity: int, multiprocessors: int) -> int
     )
 
 
+def _xpu_decode_reference(q, k, v, kv_lengths):
+    """Same-device SDPA reference for BF16 BTHD decode with per-batch lengths."""
+    if any(t.device != q.device for t in (k, v, kv_lengths)):
+        raise ValueError("decode operands must be on the same XPU device")
+    if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+        raise ValueError("decode q/k/v must use BTHD layout")
+    batch, query_length, heads, dim = q.shape
+    if (query_length != 1 or dim != 128 or k.shape != v.shape
+            or k.shape[0] != batch or k.shape[-1] != dim or k.shape[2] <= 0
+            or heads <= 0 or heads % k.shape[2] != 0):
+        raise ValueError("decode requires one query, head dimension 128 and compatible GQA heads")
+    if any(t.dtype != torch.bfloat16 for t in (q, k, v)):
+        raise TypeError("XPU decode reference requires BF16 q/k/v")
+    if kv_lengths.shape != (batch,) or kv_lengths.dtype not in (torch.int32, torch.int64):
+        raise ValueError("kv_lengths must be an integer vector with one entry per batch")
+    # Device-side assertion preserves ordering without a CPU tensor read.
+    torch._assert_async(((kv_lengths >= 0) & (kv_lengths <= k.shape[1])).all(),
+                        "kv_lengths must be within the KV capacity")
+    mask = torch.arange(k.shape[1], device=q.device)[None, :] < kv_lengths[:, None]
+    groups = heads // k.shape[2]
+    key = k.transpose(1, 2).repeat_interleave(groups, dim=1)
+    value = v.transpose(1, 2).repeat_interleave(groups, dim=1)
+    result = torch.nn.functional.scaled_dot_product_attention(
+        q.transpose(1, 2), key, value, attn_mask=mask[:, None, None, :],
+        dropout_p=0.0, is_causal=False,
+    )
+    return result.transpose(1, 2).contiguous()
+
+
 def flash_attention_decode(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, kv_lengths: torch.Tensor
 ) -> torch.Tensor:
-    """Decode attention for BF16 [batch, length, heads, 128] tensors."""
+    """Decode BF16 BTHD tensors; XPU uses a portable Torch SDPA reference."""
+    if q.device.type == "xpu":
+        return _xpu_decode_reference(q, k, v, kv_lengths)
     batch, _, query_heads, head_dim = q.shape
     _, kv_capacity, kv_heads, _ = k.shape
     if not is_available(q.device):

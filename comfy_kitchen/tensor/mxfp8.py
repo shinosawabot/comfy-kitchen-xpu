@@ -113,6 +113,11 @@ def _mxfp8_scaled_mm(
     out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """MXFP8 scaled matmul: computes a @ b.T + bias (linear semantics)."""
+    # QuantizedTensor keeps the logical bias length while packed weights pad N.
+    # The XPU reference consumes a full physical bias and the caller trims N.
+    if (a_qdata.device.type == "xpu" and bias is not None and bias.ndim == 1
+            and bias.numel() < b_qdata.shape[0]):
+        bias = torch.nn.functional.pad(bias, (0, b_qdata.shape[0] - bias.numel()))
     return ck.scaled_mm_mxfp8(
         a_qdata, b_qdata,
         block_scale_a=scale_a,

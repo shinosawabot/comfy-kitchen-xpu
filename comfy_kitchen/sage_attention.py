@@ -93,6 +93,8 @@ def _validate_inputs(
         raise TypeError(
             f"q, k, and v must have the same dtype, got {q.dtype}, {k.dtype}, and {v.dtype}"
         )
+    if q.device.type == "xpu":
+        raise NotImplementedError("XPU packed INT8 attention is not implemented; use Torch SDPA for floating Q/K/V")
     if not q.is_cuda or q.device != k.device or q.device != v.device:
         raise ValueError("q, k, and v must be on the same CUDA device")
     if not is_available(q.device):
@@ -416,6 +418,8 @@ def int8_attention_from_prequantized(
         quantized.k_scale,
         quantized.v_scale,
     )
+    if quantized.q.device.type == "xpu":
+        raise NotImplementedError("XPU packed INT8 attention consumption is not implemented")
     if not quantized.q.is_cuda:
         raise ValueError("prequantized INT8 attention tensors must be on a CUDA device")
     if any(tensor.device != quantized.q.device for tensor in packed_tensors[1:]):

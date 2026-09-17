@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 
 import torch
 
 from comfy_kitchen.constraints import (
-    ExactDims, FunctionConstraints, ParamConstraint, sol_attn_common_call_rule,
+    ExactDims, FunctionConstraints, ParamConstraint, ValidationResult, sol_attn_common_call_rule,
 )
 from comfy_kitchen.registry import registry
 
@@ -377,6 +378,51 @@ _CODE_TO_DTYPE = {
 }
 
 
+# Public reference coverage is distinct from native symbol availability.
+from . import portable as _portable
+_REFERENCE_CAPABILITIES = frozenset(_portable.__all__)
+for _name in _REFERENCE_CAPABILITIES:
+    globals()[_name] = getattr(_portable, _name)
+__all__ += sorted(_REFERENCE_CAPABILITIES)
+
+
+
+def _reference_w4a8_call_rule(kwargs):
+    """Keep an eligible existing Triton default on devices other than DG2.
+
+    A registry entry alone is not sufficient: honor disabled backends, configured
+    priority and the complete per-call Triton constraints. Explicit XPU contexts
+    can still request the reference implementation on any supported XPU.
+    """
+    if registry.get_backend_override() == "xpu":
+        return ValidationResult.ok()
+    x = kwargs.get("x")
+    if not isinstance(x, torch.Tensor):
+        return ValidationResult.ok()
+    try:
+        from omni_xpu_kernel import device as omni_device
+
+        index = x.device.index
+        if index is None:
+            index = torch.xpu.current_device()
+        if omni_device.info(index).get("physical_build_target") == "dg2":
+            return ValidationResult.ok()
+    except (ImportError, AttributeError, RuntimeError, ValueError):
+        # Unknown hardware is not evidence for selecting the DG2 reference.
+        pass
+    priority = registry._priority
+    if "triton" not in priority or not registry.is_available("triton"):
+        return ValidationResult.ok()
+    if "eager" in priority and priority.index("eager") < priority.index("triton"):
+        return ValidationResult.ok()
+    existing = registry.validate_backend_for_call("triton", "w4a8_int8_linear", kwargs)
+    if existing.success:
+        return ValidationResult.fail(
+            "__route__", "preserve the existing eligible Triton W4A8 route; use_backend('xpu') selects the reference"
+        )
+    return ValidationResult.ok()
+
+
 def _build_constraints() -> dict[str, FunctionConstraints]:
     xpu = frozenset({"xpu"})
     floats = frozenset({torch.float32, torch.float16, torch.bfloat16})
@@ -733,6 +779,17 @@ def _build_constraints() -> dict[str, FunctionConstraints]:
             default_devices=xpu,
             call_rules=(sol_attn_common_call_rule,),
         )
+    from comfy_kitchen.backends.eager import _build_constraints as _eager_constraints
+    reference_constraints = _eager_constraints()
+    for name in _REFERENCE_CAPABILITIES:
+        if name in reference_constraints:
+            constraints = replace(reference_constraints[name], default_devices=xpu)
+            if name == "w4a8_int8_linear":
+                constraints = replace(
+                    constraints,
+                    call_rules=(*constraints.call_rules, _reference_w4a8_call_rule),
+                )
+            capabilities[name] = constraints
     return capabilities
 
 
