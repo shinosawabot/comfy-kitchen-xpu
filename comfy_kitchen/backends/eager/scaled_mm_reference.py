@@ -1,8 +1,8 @@
 """Same-device FP32 decode/matmul references for unsupported scaled-mm formats.
 
-These are eager computations, not hardware backend registrations. The regular
-Torch scaled-mm route is attempted first; callers only use these fallbacks for
-an explicit unsupported-operation signal, never for arbitrary runtime errors.
+These are eager computations, not hardware backend registrations. Kitchen
+selects the eager backend before these functions run; they contain no backend
+selection or exception fallback.
 """
 
 import torch
@@ -12,18 +12,6 @@ def _require_same_device(*values):
     tensors = [value for value in values if isinstance(value, torch.Tensor)]
     if not tensors or any(value.device != tensors[0].device for value in tensors[1:]):
         raise ValueError("scaled-mm reference operands must be on the same device")
-
-
-def scaled_mm_is_unsupported(error, device_type):
-    # PyTorch 2.13 CPU/XPU explicitly reject the public block-scale swizzle recipe.
-    # OOM, malformed inputs and unrelated RuntimeError/ValueError must propagate.
-    swizzle_errors = {
-        "xpu": "XPU does not support swizzle yet.",
-        "cpu": "CPU does not support swizzle.",
-    }
-    return isinstance(error, NotImplementedError) or (
-        isinstance(error, ValueError) and str(error) == swizzle_errors.get(device_type)
-    )
 
 
 def _validate_mm(a, b, bias, out_dtype, block_size, packed):

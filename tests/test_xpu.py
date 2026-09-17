@@ -1006,6 +1006,8 @@ def test_xpu_svdquant_reference_policy_uses_input_device(monkeypatch):
     assert backend._requires_reference_w4a4(SimpleNamespace(device=torch.device("xpu:1")))
     assert not backend._requires_reference_w4a4(SimpleNamespace(device=torch.device("xpu:0")))
     assert seen == [1, 0]
+    assert not backend.native_w4a4_call_rule({"act": SimpleNamespace(device=torch.device("xpu:1"))}).success
+    assert backend.native_w4a4_call_rule({"act": SimpleNamespace(device=torch.device("xpu:0"))}).success
 
 
 def test_xpu_dg2_w4a4_reference_does_not_call_native_gemm(monkeypatch):
@@ -1017,6 +1019,10 @@ def test_xpu_dg2_w4a4_reference_does_not_call_native_gemm(monkeypatch):
 
     def reject_native(*args, **kwargs):
         raise AssertionError("DG2 W4A4 selected native oneDNN GEMM")
+
+    from comfy_kitchen.registry import registry
+    act = torch.zeros((1, 32), device="xpu", dtype=torch.int8)
+    assert registry.get_capable_backend("scaled_mm_svdquant_w4a4", {"act": act}) == "eager"
 
     monkeypatch.setattr(backend.svdq, "onednn_int4_gemm", reject_native)
     monkeypatch.setattr(backend.svdq, "onednn_int4_gemm_preconverted", reject_native)

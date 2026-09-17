@@ -299,7 +299,7 @@ if _AVAILABLE:
         from .adaln import adaln, rms_adaln
 
     if _SVDQ_AVAILABLE:
-        from .svdquant import quantize_svdquant_w4a4, scaled_mm_svdquant_w4a4
+        from .svdquant import quantize_svdquant_w4a4, scaled_mm_svdquant_w4a4, native_w4a4_call_rule
 
     if _SVDQ_W4A16_AVAILABLE:
         from .svdquant_w4a16 import svdquant_w4a16_linear
@@ -488,6 +488,7 @@ def _build_constraints() -> dict[str, FunctionConstraints]:
                         "act_unsigned": ParamConstraint(dtypes=frozenset({bool})),
                     },
                     default_devices=xpu,
+                    call_rules=(native_w4a4_call_rule,),
                 ),
             }
         )

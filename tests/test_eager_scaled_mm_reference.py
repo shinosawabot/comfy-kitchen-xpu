@@ -4,8 +4,6 @@ import pytest
 import torch
 
 import comfy_kitchen as ck
-from comfy_kitchen.backends.eager import quantization as eager
-from comfy_kitchen.backends.eager import scaled_mm_reference as reference
 from comfy_kitchen.float_utils import to_blocked
 
 
@@ -22,74 +20,6 @@ def operands(format):
 
 
 @pytest.mark.parametrize("format", ["nvfp4", "mxfp8"])
-def test_cpu_public_eager_fallback_known_codes(monkeypatch, format):
-    # Simulate an absent Torch kernel; the numerical oracle is independent of decode.
-    def missing(*args, **kwargs):
-        raise NotImplementedError("no kernel for this backend")
-
-    monkeypatch.setattr(eager, "scaled_mm_v2", missing)
-    bias = torch.arange(3).float()
-    kwargs = {"bias": bias, "out_dtype": torch.float32}
-    if format == "nvfp4":
-        kwargs["alpha"] = torch.tensor(0.25, dtype=torch.float16)
-    with ck.use_backend("eager"):
-        actual = getattr(ck, "scaled_mm_" + format)(*operands(format), **kwargs)
-    expected = torch.full((3, 3), 8.0 if format == "nvfp4" else 32.0) + bias
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("format", ["nvfp4", "mxfp8"])
-def test_supported_torch_route_is_retained(monkeypatch, format):
-    seen = []
-    sentinel = torch.ones(3, 3)
-
-    def native(*args, **kwargs):
-        seen.append((args, kwargs))
-        return sentinel
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("supported native route replaced")
-
-    monkeypatch.setattr(eager, "scaled_mm_v2", native)
-    monkeypatch.setattr(eager, "scaled_mm_" + format + "_reference", forbidden)
-    kwargs = {"out_dtype": torch.float32}
-    if format == "nvfp4":
-        kwargs["alpha"] = torch.tensor(0.25, dtype=torch.float16)
-    actual = getattr(eager, "scaled_mm_" + format)(*operands(format), **kwargs)
-    assert actual is sentinel and len(seen) == 1
-    if format == "nvfp4":
-        torch.testing.assert_close(
-            seen[0][1]["scale_a"][1], kwargs["alpha"].float().reshape(1), rtol=0, atol=0
-        )
-        torch.testing.assert_close(seen[0][1]["scale_b"][1], torch.ones(1), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        RuntimeError("out of memory"),
-        RuntimeError("invalid shape"),
-        ValueError("invalid scale layout"),
-    ],
-)
-@pytest.mark.parametrize("format", ["nvfp4", "mxfp8"])
-def test_unrelated_native_error_is_not_hidden(monkeypatch, error, format):
-    def fail(*args, **kwargs):
-        raise error
-
-    monkeypatch.setattr(eager, "scaled_mm_v2", fail)
-    with pytest.raises(type(error), match=str(error)):
-        getattr(eager, "scaled_mm_" + format)(*operands(format), out_dtype=torch.float32)
-
-
-def test_known_xpu_swizzle_rejection_is_narrow():
-    error = ValueError("XPU does not support swizzle yet.")
-    assert reference.scaled_mm_is_unsupported(error, "xpu")
-    assert not reference.scaled_mm_is_unsupported(error, "cuda")
-    assert not reference.scaled_mm_is_unsupported(ValueError("different error"), "xpu")
-
-
-@pytest.mark.parametrize("format", ["nvfp4", "mxfp8"])
 def test_cpu_actual_eager_route_known_codes(format):
     with ck.use_backend("eager"):
         actual = getattr(ck, "scaled_mm_" + format)(*operands(format), out_dtype=torch.float32)
@@ -98,7 +28,12 @@ def test_cpu_actual_eager_route_known_codes(format):
     )
 
 
-def test_known_cpu_swizzle_rejection_is_narrow():
-    error = ValueError("CPU does not support swizzle.")
-    assert reference.scaled_mm_is_unsupported(error, "cpu")
-    assert not reference.scaled_mm_is_unsupported(error, "cuda")
+def test_eager_never_calls_torch_native(monkeypatch):
+    from comfy_kitchen.backends import torch as native
+    def forbidden(*args, **kwargs):
+        raise AssertionError("eager attempted native dispatch")
+    monkeypatch.setattr(native, "_scaled_mm_v2_torch", forbidden)
+    with ck.use_backend("eager"):
+        output=ck.scaled_mm_nvfp4(*operands("nvfp4"), alpha=torch.tensor([0.25]),
+                                  bias=torch.arange(3).float(), out_dtype=torch.float32)
+    torch.testing.assert_close(output, torch.full((3,3),8.)+torch.arange(3), rtol=0,atol=0)

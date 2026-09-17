@@ -9,6 +9,7 @@ _cuda_backend = None
 from .backends import eager as _eager_backend  # noqa: F401
 from .backends import triton as _triton_backend  # noqa: F401
 from .backends import xpu as _xpu_backend  # noqa: F401
+from .backends import torch as _torch_backend  # noqa: F401
 from .backends.eager.quantization import DTYPE_TO_CODE
 from .exceptions import (
     BackendError,
@@ -59,7 +60,7 @@ if getattr(torch.version, "hip", None):
     # The HIP backend registers only on a supported AMD device (RDNA2/3/3.5/4),
     # and advertises only the ops that device can run; prefer it where it registers.
     if registry.is_available("hip"):
-        registry.set_priority(["hip", "cuda", "triton", "eager"])
+        registry.set_priority(["hip", "cuda", "triton", "torch", "eager"])
 else:
     registry.mark_unavailable("hip", "PyTorch ROCm/HIP runtime not available")
 

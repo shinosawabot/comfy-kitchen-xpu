@@ -103,6 +103,21 @@ def _xpu_preconverted_mm(
         scaled_mm_svdquant_w4a4_preconverted,
     )
 
+    # Backend eligibility is based on metadata, before any implementation runs.
+    # The cheap int8 view describes logical dtype for metadata validation only.
+    # It is never executed as a signed operand before the XOR conversion below.
+    # Stored weights are unsigned native U4; only the native path consumes them
+    # directly. A nonnative route needs an exact transient signed-format view.
+    call = dict(act=q_x, wgt=weight_qt._qdata.view(torch.int8), ascales=ascales, wscales=params.scale,
+                lora_act_in=lora_act, lora_up=params.proj_up, bias=bias)
+    selected = ck.registry.get_capable_backend("scaled_mm_svdquant_w4a4", call)
+    if selected != "xpu":
+        call["wgt"] = (weight_qt._qdata.view(torch.uint8) ^ 0x88).view(torch.int8)
+        call["wscales"] = params.scale.to(params.xpu_scale_orig_dtype or params.orig_dtype)
+        implementation = ck.registry.get_implementation(
+            "scaled_mm_svdquant_w4a4", backend=selected, kwargs=call)
+        return implementation(**call)
+
     return scaled_mm_svdquant_w4a4_preconverted(
         q_x,
         weight_qt._qdata,

@@ -22,27 +22,34 @@ implementations when no higher-priority backend can handle the call. They are
 not duplicated in the native XPU registry. Default backend priority and any
 eligible Triton route remain unchanged.
 
-The eager NVFP4/MXFP8 scaled-matrix operations first try the existing Torch
-scaled-mm route. When Torch explicitly reports the operation unsupported
-(including the current CPU/XPU swizzled-scale limitations), an eager reference
-decodes operands to FP32, accumulates in FP32 and casts the result on the input
-device. OOM and unrelated input/runtime errors propagate. For NVFP4, explicit
-`alpha` replaces the product of global tensor scales; bias is added last.
-Reference implementations can use substantially more temporary memory than a
-native packed GEMM. They are general eager computations, not native XPU kernels.
+Eager NVFP4/MXFP8 scaled-matrix operations are pure reference computations:
+FP32 dequantization, matrix multiplication and final cast. Kitchen's separate
+`torch` backend exposes only the optimized Torch scaled-mm calls and is ordered
+after existing native/Triton backends and before eager. Its constraints check
+the actual input device, API/kernel presence, CUDA 12.8+/SM10+ block-format
+support, matching dtypes, matrix dimensions, scale storage and bias layout.
+Kitchen's swizzled formats are not admitted to current CPU/XPU/ROCm Torch
+recipes. Selection occurs in the registry. The `torch` and eager implementations do not
+catch execution errors or retry a failed selected implementation.
 
-`use_backend("eager")` selects these eager implementations. The existing
-`use_backend("xpu")` context is a preference and can fall through for operations
-that XPU does not register; requesting `registry.get_implementation(...,
-backend="xpu")` directly for these reference operations raises
-`BackendNotImplementedError`. Public API availability must not be inferred
-solely from the native XPU registry.
+`use_backend("eager")` explicitly requests reference computation. Backend
+contexts remain preferences with normal registry fall-through; direct
+`registry.get_implementation(..., backend="torch", kwargs=...)` rejects an
+ineligible native call. Custom priority lists must include `torch` to select
+that optimization. Reference operations are not duplicated in XPU's registry.
+NVFP4 `alpha` replaces the global-scale product and bias is added last. Reference
+paths can allocate full FP32 intermediates; no native throughput is claimed.
 
-`flash_attention_decode` accepts BF16 XPU BTHD tensors through a Torch SDPA
-reference, including GQA and per-batch KV lengths. Query availability with the
-explicit XPU device; the no-argument query retains the native CUDA/HIP meaning.
-This does not change ordinary ComfyUI attention routing. Neighborhood attention
-continues to have an eager XPU fallback.
+DG2 W4A4 GEMM is rejected by the native XPU call constraint, so the registry
+selects eager. The tensor layout adapter transiently restores preconverted
+unsigned U4 storage to signed Kitchen format and its original scale dtype
+before dispatching to a nonnative backend; persistent storage is unchanged.
+Native preconverted GEMM remains available where its constraints permit it.
+
+Native `flash_attention_decode` remains unavailable on XPU and rejects XPU
+calls. Ordinary Torch SDPA is not advertised as flash decode and existing
+ComfyUI attention routing is unchanged. Neighborhood attention retains its
+eager implementation.
 
 Without the native Sol sidecar, the Sol reference supports `token_aug=0`;
 nonzero token augmentation and the chunked producer API raise

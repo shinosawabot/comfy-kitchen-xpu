@@ -7,6 +7,7 @@ import torch.nn.functional as F  # noqa: N812
 from omni_xpu_kernel import device as omni_device, svdq
 
 from comfy_kitchen.backends.eager import svdquant as eager_svdquant
+from comfy_kitchen.constraints import ValidationResult
 
 _GROUP_SIZE = 64
 
@@ -16,6 +17,15 @@ def _requires_reference_w4a4(tensor: torch.Tensor) -> bool:
     if index is None:
         index = torch.xpu.current_device()
     return omni_device.info(index).get("physical_build_target") == "dg2"
+
+
+def native_w4a4_call_rule(kwargs):
+    act = kwargs.get("act")
+    if act is not None and _requires_reference_w4a4(act):
+        return ValidationResult.fail("act", "DG2 W4A4 rounding requires the eager backend")
+    if kwargs.get("act_unsigned", False) and not hasattr(svdq, "dequantize_u4"):
+        return ValidationResult.fail("act_unsigned", "native unsigned activation dequantization unavailable")
+    return ValidationResult.ok()
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -89,14 +99,9 @@ def scaled_mm_svdquant_w4a4(
     act_unsigned: bool = False,
 ) -> torch.Tensor:
     """Run Kitchen-equivalent SVDQuant using omni dequant and oneDNN GEMM."""
-    # DG2's oneDNN INT4 path currently differs from Kitchen's W4A4 reference
-    # rounding. Keep the public operation on its exact same-device eager route
-    # until the native path satisfies this contract. Inspect the input device,
-    # not the default XPU or the provider's packaging target.
-    if _requires_reference_w4a4(act) or (act_unsigned and not hasattr(svdq, "dequantize_u4")):
-        return eager_svdquant.scaled_mm_svdquant_w4a4(
-            act, wgt, ascales, wscales, lora_act_in, lora_up, bias, act_unsigned
-        )
+    eligibility = native_w4a4_call_rule({"act": act, "act_unsigned": act_unsigned})
+    if not eligibility.success:
+        raise NotImplementedError(eligibility.failure_reason)
 
     wgt, wscales, lora_up = prepare_svdquant_weights(wgt, wscales, lora_up)
     compute_dtype = wscales.dtype
@@ -127,14 +132,7 @@ def scaled_mm_svdquant_w4a4_preconverted(
 ) -> torch.Tensor:
     """Run SVDQuant with destructively prepared, single-copy XPU weights."""
     if _requires_reference_w4a4(act):
-        # Restore the signed view transiently; do not mutate prepared storage.
-        # This reference route materializes intermediates and is not the
-        # low-peak native oneDNN route.
-        signed_weight = (packed_u4.view(torch.uint8) ^ 0x88).view(torch.int8)
-        return eager_svdquant.scaled_mm_svdquant_w4a4(
-            act, signed_weight, ascales, scales_f16.to(compute_dtype),
-            lora_act_in, lora_up, bias,
-        )
+        raise NotImplementedError("DG2 preconverted W4A4 requires the tensor format adapter")
     act_fp = svdq.dequantize_w4(act.view(torch.uint8), ascales, compute_dtype)
     out = svdq.onednn_int4_gemm_preconverted(
         act_fp,

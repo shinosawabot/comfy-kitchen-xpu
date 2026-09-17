@@ -11,46 +11,16 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("groups", [1, 3])
-@pytest.mark.parametrize("lengths", [(1, 17), (0, 32), (32, 32)])
-def test_flash_decode_reference_gqa_and_lengths(groups, lengths):
-    torch.manual_seed(130)
-    q = torch.randn(2, 1, 2 * groups, 128, device="xpu", dtype=torch.bfloat16)
-    k = torch.randn(2, 32, 2, 128, device="xpu", dtype=torch.bfloat16)
-    v = torch.randn_like(k)
-    lens = torch.tensor(lengths, device="xpu", dtype=torch.int32)
-    actual = ck.flash_attention_decode(q, k, v, lens)
-    expected = []
-    for b, length in enumerate(lengths):
-        if length == 0:
-            expected.append(torch.zeros_like(q[b]).float().cpu())
-            continue
-        query = q[b].float().cpu().transpose(0, 1)
-        key = k[b, :length].float().cpu().transpose(0, 1).repeat_interleave(groups, dim=0)
-        value = v[b, :length].float().cpu().transpose(0, 1).repeat_interleave(groups, dim=0)
-        probabilities = torch.softmax(query @ key.transpose(-1, -2) * 128**-0.5, dim=-1)
-        expected.append((probabilities @ value).transpose(0, 1))
-    torch.testing.assert_close(actual.float().cpu(), torch.stack(expected), rtol=0.02, atol=0.01)
-    assert actual.shape == q.shape and actual.dtype == q.dtype and actual.is_contiguous()
-    assert ck.flash_attention_decode_is_available(q.device)
-
-
-@pytest.mark.parametrize("bad", ["host_lengths", "length_shape", "dtype", "heads"])
-def test_flash_decode_reference_rejects_invalid_contract(bad):
-    q = torch.zeros(1, 1, 4, 128, device="xpu", dtype=torch.bfloat16)
-    k = torch.zeros(1, 8, 2, 128, device="xpu", dtype=torch.bfloat16)
-    v = k.clone()
-    lens = torch.tensor([8], device="xpu", dtype=torch.int32)
-    if bad == "host_lengths":
-        lens = lens.cpu()
-    elif bad == "length_shape":
-        lens = lens[:, None]
-    elif bad == "dtype":
-        q = q.float()
-    elif bad == "heads":
-        q = q[:, :, :3]
-    with pytest.raises((ValueError, TypeError)):
-        ck.flash_attention_decode(q, k, v, lens)
+def test_native_flash_decode_is_unavailable_on_xpu(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("flash decode called ordinary SDPA")
+    monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", forbidden)
+    assert not ck.flash_attention_decode_is_available("xpu")
+    q=torch.zeros(1,1,2,128,device="xpu",dtype=torch.bfloat16)
+    assert not ck.flash_attention_decode_is_available(q.device)
+    k=torch.zeros(1,8,2,128,device=q.device,dtype=q.dtype)
+    with pytest.raises(NotImplementedError, match="Native flash_attention_decode"):
+        ck.flash_attention_decode(q,k,k,torch.tensor([8],device=q.device,dtype=torch.int32))
 
 
 @pytest.mark.parametrize("causal_controls", [False, True])
