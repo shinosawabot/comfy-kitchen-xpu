@@ -16,16 +16,27 @@ and remains grateful to
 
 ### Portable XPU format coverage
 
-The XPU backend also exposes reference implementations for NVFP4 and MXFP8
-quantization, dequantization and scaled matrix multiplication, W4A8 weight
-quantization/dequantization/linear, and AWQ W4A16 GEMV. These routes use PyTorch
-operations on the input XPU; registration does not mean native low-bit matrix
-acceleration. The backend's `_REFERENCE_CAPABILITIES` distinguishes these
-entries from Omni native capability flags. Scaled NVFP4/MXFP8 multiplication
-decodes operands to FP32, accumulates in FP32 and casts the result. For NVFP4,
-explicit `alpha` replaces the product of global tensor scales; bias is added
-last. Reference implementations can use substantially more temporary memory
-than a native packed GEMM.
+NVFP4/MXFP8 quantization and dequantization, W4A8 weight
+quantization/dequantization/linear, and AWQ W4A16 GEMV use the existing eager
+implementations when no higher-priority backend can handle the call. They are
+not duplicated in the native XPU registry. Default backend priority and any
+eligible Triton route remain unchanged.
+
+The eager NVFP4/MXFP8 scaled-matrix operations first try the existing Torch
+scaled-mm route. When Torch explicitly reports the operation unsupported
+(including the current CPU/XPU swizzled-scale limitations), an eager reference
+decodes operands to FP32, accumulates in FP32 and casts the result on the input
+device. OOM and unrelated input/runtime errors propagate. For NVFP4, explicit
+`alpha` replaces the product of global tensor scales; bias is added last.
+Reference implementations can use substantially more temporary memory than a
+native packed GEMM. They are general eager computations, not native XPU kernels.
+
+`use_backend("eager")` selects these eager implementations. The existing
+`use_backend("xpu")` context is a preference and can fall through for operations
+that XPU does not register; requesting `registry.get_implementation(...,
+backend="xpu")` directly for these reference operations raises
+`BackendNotImplementedError`. Public API availability must not be inferred
+solely from the native XPU registry.
 
 `flash_attention_decode` accepts BF16 XPU BTHD tensors through a Torch SDPA
 reference, including GQA and per-batch KV lengths. Query availability with the

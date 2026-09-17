@@ -1,12 +1,12 @@
-"""A770-safe public format contracts; portable routes are not native acceleration."""
+"""A770 public format contracts through eager, without duplicate XPU registration."""
 
 import pytest
 import torch
 
 import comfy_kitchen as ck
 from comfy_kitchen.backends.eager import quantization as reference
+from comfy_kitchen.backends.eager import scaled_mm_reference as reference_mm
 from comfy_kitchen.backends.eager import w4a8_int8 as w4_reference
-from comfy_kitchen.backends.xpu import portable
 
 pytestmark = [
     pytest.mark.xpu,
@@ -29,7 +29,7 @@ def test_nvfp4_qdq_packed_cpu_oracle(dtype, hi_first, pad):
     x = torch.randn((5, 37) if pad else (5, 64), dtype=dtype)
     x[0] = 0
     scale = torch.tensor([0.25])
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         q, s = ck.quantize_nvfp4(x.to("xpu"), scale.to("xpu"), pad_16x=pad, hi_first=hi_first)
         out = ck.dequantize_nvfp4(q, scale.to("xpu"), s, output_type=dtype, hi_first=hi_first)
     expected_q, expected_s = reference.quantize_nvfp4(x, scale, pad_16x=pad, hi_first=hi_first)
@@ -49,7 +49,7 @@ def test_mxfp8_qdq_packed_cpu_oracle(dtype, pad):
     torch.manual_seed(118)
     x = torch.randn((5, 37) if pad else (5, 64), dtype=dtype)
     x[0] = 0
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         q, s = ck.quantize_mxfp8(x.to("xpu"), pad_32x=pad)
         out = ck.dequantize_mxfp8(q, s, output_type=dtype)
     eq, es = reference.quantize_mxfp8(x, pad)
@@ -67,7 +67,7 @@ def test_scaled_mm_asymmetric_linear_semantics(format, dtype, with_bias):
     a, b = torch.randn(7, 64), torch.randn(11, 64)
     bias = torch.randn(11) if with_bias else None
     sa, sb = torch.tensor([0.125]), torch.tensor([0.5])
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         if format == "nvfp4":
             qa, ba = ck.quantize_nvfp4(a.to("xpu"), sa.to("xpu"))
             qb, bb = ck.quantize_nvfp4(b.to("xpu"), sb.to("xpu"))
@@ -113,7 +113,7 @@ def test_nvfp4_explicit_alpha_replaces_global_scale_product():
     sb = torch.tensor([3.0], device="xpu")
     alpha = torch.tensor([0.25], device="xpu")
     bias = torch.arange(3, device="xpu").float()
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         actual = ck.scaled_mm_nvfp4(
             q, q, sa, sb, blocks, blocks, bias=bias, alpha=alpha, out_dtype=torch.float32
         )
@@ -134,7 +134,7 @@ def test_w4a8_packed_and_linear_cpu_reference(group, correction):
         "codebook": False,
         "symmetric": not correction,
     }
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         packed = ck.quantize_w4a8_int8_weight(w.to("xpu"), **kwargs)
         operands = (*packed[:3], packed[4], packed[3])
         decoded = ck.dequantize_w4a8_int8_weight(
@@ -167,7 +167,7 @@ def test_awq_independent_uint4_oracle(shape):
     weight = (
         (codes.float().reshape(5, 2, 32) - 8) * scales.T.unsqueeze(-1) + zeros.T.unsqueeze(-1)
     ).reshape(5, 64)
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         out = ck.gemv_awq_w4a16(
             x.to("xpu"),
             packed.to("xpu"),
@@ -181,12 +181,11 @@ def test_awq_independent_uint4_oracle(shape):
 
 def test_reference_device_guard_and_shape_error():
     q = torch.zeros(2, 32, dtype=torch.float8_e4m3fn, device="xpu")
+    scales = torch.zeros(128, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu)
     with pytest.raises(ValueError, match="same device"):
-        portable.dequantize_mxfp8(
-            q, torch.zeros(128, 4, dtype=torch.uint8).view(torch.float8_e8m0fnu)
-        )
+        reference_mm.scaled_mm_mxfp8_reference(q, q, scales, scales)
     with pytest.raises(ValueError, match="matching K"):
-        portable.scaled_mm_mxfp8(q, q[:, :16], q, q)
+        reference_mm.scaled_mm_mxfp8_reference(q, q[:, :16], q, q)
 
 
 @pytest.mark.parametrize("causal", [(False, False, False), (True, False, True)])
@@ -216,7 +215,7 @@ def test_quantized_tensor_public_layout(layout, operation):
     from comfy_kitchen.tensor import QuantizedTensor
 
     torch.manual_seed(124)
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         a = QuantizedTensor.from_float(torch.randn(5, 64, device="xpu"), layout)
         b = QuantizedTensor.from_float(torch.randn(32, 64, device="xpu"), layout)
         bias = torch.randn(32, device="xpu")
@@ -258,7 +257,7 @@ def test_portable_compile_and_nondefault_stream(format):
 
     torch.xpu.synchronize()
     stream = torch.xpu.Stream()
-    with ck.use_backend("xpu"), torch.xpu.stream(stream):
+    with ck.use_backend("eager"), torch.xpu.stream(stream):
         out = torch.compile(fn, backend="eager", fullgraph=True)(q, q)
     stream.synchronize()
     torch.testing.assert_close(out, torch.full((3, 3), 32.0, device="xpu"), rtol=0, atol=0)
@@ -269,7 +268,7 @@ def test_w4a8_codebook_and_seeded_quantization(scale_dtype):
     torch.manual_seed(125)
     weight = torch.randn(8, 256, device="xpu")
     table = torch.linspace(-7, 7, 16, device="xpu")
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         first = ck.quantize_w4a8_int8_weight(
             weight, scale_dtype=scale_dtype, codebook_tensor=table, stochastic_rounding=13
         )
@@ -296,7 +295,7 @@ def test_quantized_tensor_unaligned_bias_contract(layout):
     from comfy_kitchen.tensor import QuantizedTensor
 
     torch.manual_seed(126)
-    with ck.use_backend("xpu"):
+    with ck.use_backend("eager"):
         a = QuantizedTensor.from_float(torch.randn(5, 65, device="xpu"), layout)
         b = QuantizedTensor.from_float(torch.randn(7, 65, device="xpu"), layout)
         bias = torch.randn(7, device="xpu")
