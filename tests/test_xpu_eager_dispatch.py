@@ -58,18 +58,24 @@ def test_existing_triton_selection_preserved(monkeypatch, enabled):
         assert registry.get_capable_backend(op, kwargs) == "eager"
 
 
-def test_actual_a770_default_calls_eager(monkeypatch):
+def _require_dg2(selected_device):
     from omni_xpu_kernel import device
 
+    if device.info(selected_device.index).get("physical_build_target") != "dg2":
+        pytest.skip("DG2-specific default eager route")
+
+
+def test_actual_a770_default_calls_eager(monkeypatch):
     from comfy_kitchen.backends import eager
 
-    assert device.info(0)["physical_build_target"] == "dg2"
+    selected_device = torch.device("xpu", torch.xpu.current_device())
+    _require_dg2(selected_device)
     torch.manual_seed(127)
     packed = ck.quantize_w4a8_int8_weight(
-        torch.randn(8, 256, device="xpu"), scale_dtype=torch.float32, codebook=False
+        torch.randn(8, 256, device=selected_device), scale_dtype=torch.float32, codebook=False
     )
     kwargs = {
-        "x": torch.randn(2, 256, device="xpu"),
+        "x": torch.randn(2, 256, device=selected_device),
         "qdata": packed[0],
         "s_rel": packed[1],
         "s_channel": packed[2],
