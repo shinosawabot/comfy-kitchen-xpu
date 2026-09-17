@@ -179,12 +179,13 @@ def test_provider_builder_rejects_unknown_target(tmp_path, target):
         )
 
 
-def test_cli_accepts_dg2(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target", ["bmg", "ptl-h", "dg2"])
+def test_cli_accepts_supported_target(tmp_path, monkeypatch, target):
     builder = _load_builder()
     monkeypatch.setattr(sys, "argv", [
         str(_BUILDER), "--source-wheel", str(tmp_path / "source.whl"),
         "--output-dir", str(tmp_path / "dist"),
         "--source-revision", "d" * 40, "--torch-version", "2.13.0+xpu",
-        "--xpu-target", "dg2",
+        "--xpu-target", target,
     ])
-    assert builder._parse_args().xpu_target == "dg2"
+    assert builder._parse_args().xpu_target == target
