@@ -180,39 +180,28 @@ def _handle_mxfp8_addmm(qt, args, kwargs):
     bias, mat1, mat2 = args[0], args[1], args[2]
 
     if not (isinstance(mat1, QuantizedTensor) and isinstance(mat2, QuantizedTensor)):
-        return torch.addmm(*dequantize_args((bias, mat1, mat2)), **kwargs)
+        return torch.addmm(*dequantize_args((bias, mat1, mat2)))
     if mat1._qdata.dim() != 2:
-        return torch.addmm(*dequantize_args((bias, mat1, mat2)), **kwargs)
+        return torch.addmm(*dequantize_args((bias, mat1, mat2)))
 
     input_transposed = getattr(mat1._params, "transposed", False)
     weight_transposed = getattr(mat2._params, "transposed", False)
 
     if input_transposed or not weight_transposed:
-        return torch.addmm(*dequantize_args((bias, mat1, mat2)), **kwargs)
-
-    orig_m = mat1._params.orig_shape[0]
-    orig_n = mat2._params.orig_shape[1]
-    # Packed scaled-mm only accepts a column bias. Delegate other broadcasts
-    # and scaled addmm to Torch using logical (dequantized) shapes; this also
-    # preserves Torch's error semantics for incompatible bias shapes.
-    if (kwargs.get("alpha", 1) != 1 or kwargs.get("beta", 1) != 1
-            or bias.ndim != 1 or bias.shape[0] != orig_n):
-        return torch.addmm(*dequantize_args((bias, mat1, mat2)), **kwargs)
+        return torch.addmm(*dequantize_args((bias, mat1, mat2)))
 
     input_qdata, scale_a = TensorCoreMXFP8Layout.get_plain_tensors(mat1)
     weight_qdata, scale_b = TensorCoreMXFP8Layout.get_plain_tensors(mat2)
     out_dtype = mat1._params.orig_dtype
 
-    packed_bias = bias
-    if weight_qdata.shape[0] != orig_n:
-        packed_bias = torch.nn.functional.pad(bias, (0, weight_qdata.shape[0] - orig_n))
-
     try:
-        result = _mxfp8_scaled_mm(input_qdata, weight_qdata, scale_a, scale_b, packed_bias, out_dtype)
+        result = _mxfp8_scaled_mm(input_qdata, weight_qdata, scale_a, scale_b, bias, out_dtype)
+        orig_m = mat1._params.orig_shape[0]
+        orig_n = mat2._params.orig_shape[1]
         return _slice_to_original_shape(result, orig_m, orig_n)
     except (RuntimeError, TypeError) as e:
         logger.warning(f"MXFP8 addmm failed: {e}")
-        return torch.addmm(*dequantize_args((bias, mat1, mat2)), **kwargs)
+        return torch.addmm(*dequantize_args((bias, mat1, mat2)))
 
 
 @register_layout_op(torch.ops.aten.linear.default, TensorCoreMXFP8Layout)
@@ -229,20 +218,12 @@ def _handle_mxfp8_linear(qt, args, kwargs):
     if getattr(input_tensor._params, "transposed", False) or getattr(weight._params, "transposed", False):
         return torch.nn.functional.linear(*dequantize_args((input_tensor, weight, bias)))
 
-    orig_n = weight._params.orig_shape[0]
-    if bias is not None and (bias.ndim != 1 or bias.shape[0] != orig_n):
-        return torch.nn.functional.linear(*dequantize_args((input_tensor, weight, bias)))
-
     input_qdata, scale_a = TensorCoreMXFP8Layout.get_plain_tensors(input_tensor)
     weight_qdata, scale_b = TensorCoreMXFP8Layout.get_plain_tensors(weight)
     out_dtype = kwargs.get("out_dtype", input_tensor._params.orig_dtype)
 
-    packed_bias = bias
-    if bias is not None and weight_qdata.shape[0] != orig_n:
-        packed_bias = torch.nn.functional.pad(bias, (0, weight_qdata.shape[0] - orig_n))
-
     try:
-        result = _mxfp8_scaled_mm(input_qdata, weight_qdata, scale_a, scale_b, packed_bias, out_dtype)
+        result = _mxfp8_scaled_mm(input_qdata, weight_qdata, scale_a, scale_b, bias, out_dtype)
         return _slice_to_original_shape(result, input_tensor._params.orig_shape[0], weight._params.orig_shape[0])
     except (RuntimeError, TypeError) as e:
         logger.warning(f"MXFP8 linear failed: {e}")

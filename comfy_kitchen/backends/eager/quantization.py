@@ -23,12 +23,8 @@ from comfy_kitchen.float_utils import (
     to_blocked,
 )
 from comfy_kitchen.registry import registry
+from comfy_kitchen.scaled_mm_v2 import ScalingType, SwizzleType, scaled_mm_v2
 from comfy_kitchen.tensor.int8_utils import _build_hadamard, _rotate_activation, _rotate_weight
-
-from .scaled_mm_reference import (
-    scaled_mm_mxfp8_reference,
-    scaled_mm_nvfp4_reference,
-)
 
 # =============================================================================
 # Dtype Code Mappings (shared between custom ops and backends)
@@ -237,10 +233,20 @@ def scaled_mm_nvfp4(
     out_dtype: torch.dtype | None = None,
     alpha: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return scaled_mm_nvfp4_reference(
-        a, b, tensor_scale_a, tensor_scale_b, block_scale_a, block_scale_b,
-        bias, out_dtype, alpha,
+    result = scaled_mm_v2(
+        a.view(torch.float4_e2m1fn_x2),
+        b.view(torch.float4_e2m1fn_x2).t(),
+        scale_a=[block_scale_a.view(-1), tensor_scale_a],
+        scale_b=[block_scale_b.view(-1), tensor_scale_b],
+        bias=bias,
+        out_dtype=out_dtype,
+        scale_recipe_a = [ScalingType.BlockWise1x16, ScalingType.TensorWise],
+        scale_recipe_b = [ScalingType.BlockWise1x16, ScalingType.TensorWise],
+        swizzle_a = [SwizzleType.SWIZZLE_32_4_4, SwizzleType.NO_SWIZZLE],
+        swizzle_b = [SwizzleType.SWIZZLE_32_4_4, SwizzleType.NO_SWIZZLE],
     )
+
+    return result
 
 
 # =============================================================================
@@ -383,7 +389,20 @@ def scaled_mm_mxfp8(
 
     Scales are expected to be in swizzled (SWIZZLE_32_4_4) format from quantize_mxfp8.
     """
-    return scaled_mm_mxfp8_reference(a, b, block_scale_a, block_scale_b, bias, out_dtype)
+    result = scaled_mm_v2(
+        a,
+        b.t(),  # Transpose b for linear semantics: a @ b.T
+        scale_a=block_scale_a,
+        scale_b=block_scale_b,
+        bias=bias,
+        out_dtype=out_dtype,
+        scale_recipe_a=ScalingType.BlockWise1x32,
+        scale_recipe_b=ScalingType.BlockWise1x32,
+        swizzle_a=SwizzleType.SWIZZLE_32_4_4,
+        swizzle_b=SwizzleType.SWIZZLE_32_4_4,
+    )
+
+    return result
 
 # =============================================================================
 # torch.library Custom Op Definitions

@@ -4,28 +4,11 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F  # noqa: N812
-from omni_xpu_kernel import device as omni_device, svdq
+from omni_xpu_kernel import svdq
 
 from comfy_kitchen.backends.eager import svdquant as eager_svdquant
-from comfy_kitchen.constraints import ValidationResult
 
 _GROUP_SIZE = 64
-
-
-def _requires_reference_w4a4(tensor: torch.Tensor) -> bool:
-    index = tensor.device.index
-    if index is None:
-        index = torch.xpu.current_device()
-    return omni_device.info(index).get("physical_build_target") == "dg2"
-
-
-def native_w4a4_call_rule(kwargs):
-    act = kwargs.get("act")
-    if act is not None and _requires_reference_w4a4(act):
-        return ValidationResult.fail("act", "DG2 W4A4 rounding requires the eager backend")
-    if kwargs.get("act_unsigned", False) and not hasattr(svdq, "dequantize_u4"):
-        return ValidationResult.fail("act_unsigned", "native unsigned activation dequantization unavailable")
-    return ValidationResult.ok()
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -99,9 +82,10 @@ def scaled_mm_svdquant_w4a4(
     act_unsigned: bool = False,
 ) -> torch.Tensor:
     """Run Kitchen-equivalent SVDQuant using omni dequant and oneDNN GEMM."""
-    eligibility = native_w4a4_call_rule({"act": act, "act_unsigned": act_unsigned})
-    if not eligibility.success:
-        raise NotImplementedError(eligibility.failure_reason)
+    if act_unsigned and not hasattr(svdq, "dequantize_u4"):
+        return eager_svdquant.scaled_mm_svdquant_w4a4(
+            act, wgt, ascales, wscales, lora_act_in, lora_up, bias, act_unsigned
+        )
 
     wgt, wscales, lora_up = prepare_svdquant_weights(wgt, wscales, lora_up)
     compute_dtype = wscales.dtype
@@ -131,8 +115,6 @@ def scaled_mm_svdquant_w4a4_preconverted(
     compute_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Run SVDQuant with destructively prepared, single-copy XPU weights."""
-    if _requires_reference_w4a4(act):
-        raise NotImplementedError("DG2 preconverted W4A4 requires the tensor format adapter")
     act_fp = svdq.dequantize_w4(act.view(torch.uint8), ascales, compute_dtype)
     out = svdq.onednn_int4_gemm_preconverted(
         act_fp,

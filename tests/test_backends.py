@@ -71,9 +71,9 @@ assert "{env_name}=1" not in reason, status
 
         original = list(ck.registry._priority)
         try:
-            assert original == ["xpu", "triton", "torch", "eager"]
+            assert original == ["xpu", "triton", "eager"]
             ck.set_backend_priority(["eager", "xpu", "triton"])
-            ck.set_backend_priority(["xpu", "triton", "torch", "eager"])
+            ck.set_backend_priority(["xpu", "triton", "eager"])
         finally:
             ck.set_backend_priority(original)
 
@@ -211,7 +211,7 @@ assert 'int8_linear' not in status['capabilities']
     def test_clean_import_does_not_register_cuda(self):
         script = """
 import comfy_kitchen as ck
-assert ck.registry._priority == ['xpu', 'triton', 'torch', 'eager']
+assert ck.registry._priority == ['xpu', 'triton', 'eager']
 assert 'cuda' not in ck.list_backends()
 """
         result = subprocess.run(
@@ -239,7 +239,7 @@ sys.meta_path.insert(0, BlockCudaBackend())
 import comfy_kitchen as ck
 assert ck.flash_attention_decode_is_available() is False
 assert ck.int8_attention_is_available() is False
-assert ck.registry._priority == ['xpu', 'triton', 'torch', 'eager']
+assert ck.registry._priority == ['xpu', 'triton', 'eager']
 assert 'cuda' not in ck.list_backends()
 """
         result = subprocess.run(

@@ -18,9 +18,7 @@ _MINIMUM_CAPABILITY = (8, 0)
 
 
 def is_available(device: torch.device | int | None = None) -> bool:
-    """Return whether native flash attention decode is available on this GPU."""
-    if isinstance(device, (str, torch.device)) and torch.device(device).type == "xpu":
-        return False
+    """Return whether flash attention decode is available on this GPU."""
     if (
         _cuda_backend is None
         or not torch.cuda.is_available()
@@ -68,8 +66,6 @@ def flash_attention_decode(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, kv_lengths: torch.Tensor
 ) -> torch.Tensor:
     """Decode attention for BF16 [batch, length, heads, 128] tensors."""
-    if q.device.type == "xpu":
-        raise NotImplementedError("Native flash_attention_decode is not implemented on XPU")
     batch, _, query_heads, head_dim = q.shape
     _, kv_capacity, kv_heads, _ = k.shape
     if not is_available(q.device):
